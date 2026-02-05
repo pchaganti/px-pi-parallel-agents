@@ -106,23 +106,120 @@ function writePromptToTempFile(
 
 /**
  * Extract tool call preview for display.
+ * Shows the most relevant argument for each tool type.
  */
-function extractToolArgsPreview(args: Record<string, unknown>): string {
-  const previewKeys = [
+function extractToolArgsPreview(
+  toolName: string,
+  args: Record<string, unknown>
+): string {
+  if (!args || typeof args !== "object") return "";
+
+  // Tool-specific formatting for better context
+  switch (toolName) {
+    case "read":
+      if (args.path) {
+        const p = String(args.path);
+        const shortPath = p.length > 50 ? "..." + p.slice(-47) : p;
+        if (args.offset || args.limit) {
+          return `${shortPath} [${args.offset || 1}-${(Number(args.offset) || 1) + (Number(args.limit) || 100)}]`;
+        }
+        return shortPath;
+      }
+      break;
+
+    case "write":
+      if (args.path) {
+        const p = String(args.path);
+        const shortPath = p.length > 40 ? "..." + p.slice(-37) : p;
+        const size = args.content ? `(${String(args.content).length} chars)` : "";
+        return `${shortPath} ${size}`;
+      }
+      break;
+
+    case "edit":
+      if (args.path) {
+        const p = String(args.path);
+        const shortPath = p.length > 50 ? "..." + p.slice(-47) : p;
+        return shortPath;
+      }
+      break;
+
+    case "bash":
+      if (args.command) {
+        const cmd = String(args.command);
+        return cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd;
+      }
+      break;
+
+    case "grep":
+    case "rg":
+      if (args.pattern) {
+        const pattern = String(args.pattern);
+        const path = args.path ? ` in ${String(args.path)}` : "";
+        const preview = pattern + path;
+        return preview.length > 60 ? preview.slice(0, 57) + "..." : preview;
+      }
+      break;
+
+    case "find":
+      if (args.path) {
+        const p = String(args.path);
+        const name = args.name ? ` -name "${args.name}"` : "";
+        const preview = p + name;
+        return preview.length > 60 ? preview.slice(0, 57) + "..." : preview;
+      }
+      break;
+
+    case "mcp":
+      if (args.tool) return `tool: ${args.tool}`;
+      if (args.search) return `search: ${args.search}`;
+      if (args.server) return `server: ${args.server}`;
+      break;
+
+    case "subagent":
+      if (args.task) {
+        const t = String(args.task);
+        return t.length > 50 ? t.slice(0, 47) + "..." : t;
+      }
+      if (args.agent) return `agent: ${args.agent}`;
+      break;
+
+    case "todo":
+      if (args.action) {
+        const action = String(args.action);
+        if (args.title) return `${action}: ${String(args.title).slice(0, 40)}`;
+        if (args.id) return `${action}: ${args.id}`;
+        return action;
+      }
+      break;
+  }
+
+  // Fallback: try common keys
+  const fallbackKeys = [
     "command",
-    "file_path",
     "path",
+    "file",
     "pattern",
     "query",
     "url",
     "task",
     "prompt",
+    "name",
+    "action",
   ];
 
-  for (const key of previewKeys) {
+  for (const key of fallbackKeys) {
     if (args[key] && typeof args[key] === "string") {
       const value = args[key] as string;
-      return value.length > 60 ? `${value.slice(0, 57)}...` : value;
+      return value.length > 60 ? value.slice(0, 57) + "..." : value;
+    }
+  }
+
+  // Last resort: show first string arg
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.length > 0) {
+      const preview = `${key}: ${value}`;
+      return preview.length > 60 ? preview.slice(0, 57) + "..." : preview;
     }
   }
 
@@ -260,7 +357,10 @@ export async function runAgent(options: ExecutorOptions): Promise<TaskResult> {
         // Handle tool execution events
         if (event.type === "tool_execution_start") {
           progress.currentTool = event.toolName;
-          progress.currentToolArgs = extractToolArgsPreview(event.input || {});
+          progress.currentToolArgs = extractToolArgsPreview(
+            event.toolName || "",
+            event.args || {}
+          );
           emitProgress();
         }
 
