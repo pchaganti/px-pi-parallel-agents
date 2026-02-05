@@ -1,6 +1,6 @@
 {
   "name": "pi-parallel-agents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dynamic parallel agent execution for pi - run multiple agents with different models without pre-defining configurations",
   "keywords": [
     "pi-package",
@@ -14,7 +14,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/messense/pi-parallel-agents"
+    "url": "git+https://github.com/messense/pi-parallel-agents.git"
   },
   "type": "module",
   "main": "src/index.ts",
