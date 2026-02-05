@@ -1,22 +1,15 @@
 # pi-parallel-agents
 
-A [pi](https://github.com/badlogic/pi-mono) extension for dynamic parallel agent execution. Run multiple agents with different models in parallel, with or without pre-defined agent configurations.
+A [pi](https://github.com/badlogic/pi-mono) extension for running multiple AI agents in parallel with different models.
 
 ## Features
 
-- **Dynamic Model Selection**: Specify model per task inline (e.g., `claude-haiku-4-5`, `gpt-4o-mini`)
-- **Agent Integration**: Reference existing agents from `~/.pi/agent/agents` or `.pi/agents`
-- **Four Execution Modes**:
-  - **Single**: One task with optional model/tools override
-  - **Parallel**: Multiple tasks running concurrently with configurable concurrency
-  - **Chain**: Sequential execution with `{previous}` placeholder for context passing
-  - **Race**: Multiple models compete on the same task, first to complete wins
-- **Streaming Progress**: Real-time updates showing tool calls and partial output
-- **Context Building**: Auto-read files and git context before execution
-- **Cross-Task References**: Use `{task_N}` to reference outputs from earlier parallel tasks
-- **Cost Tracking**: See per-task and total API costs
-- **Tool Restrictions**: Optionally restrict tools per task for safety/efficiency
-- **Custom System Prompts**: Override system prompts per task
+- **Multiple Models**: Run tasks with different models (haiku, sonnet, gpt-4o, etc.)
+- **Four Modes**: Single task, parallel tasks, sequential chains, or model races
+- **Agent Reuse**: Reference your existing agent definitions
+- **Smart Context**: Auto-includes git branch/status; optionally add files or full diffs
+- **Live Progress**: See what each agent is doing in real-time
+- **Cost Tracking**: Per-task and total API costs
 
 ## Installation
 
@@ -24,277 +17,221 @@ A [pi](https://github.com/badlogic/pi-mono) extension for dynamic parallel agent
 pi install npm:pi-parallel-agents
 ```
 
-Or for local development:
+## Quick Examples
 
-```bash
-pi install /path/to/pi-parallel-agents
-```
-
-## Usage
-
-The extension registers a `parallel` tool that the LLM can use. Just describe what you want in natural language:
-
-### Using Existing Agents
-
-Reference agents defined in `~/.pi/agent/agents/*.md` (user-level) or `.pi/agents/*.md` (project-level):
+### Parallel Code Review
 
 ```
-Use the scout agent to find all authentication code
+Have haiku and sonnet review the current changes in parallel
 ```
 
-```
-Run a chain: scout to analyze the codebase, then planner to create an implementation plan
-```
+The extension automatically includes git branch and status. Each agent can run `git diff` themselves if they need more detail.
 
-```
-In parallel, have scout find models and worker implement the changes
-```
-
-Agent settings (model, tools, systemPrompt) are used as defaults. Inline parameters override agent defaults:
-
-```
-Use the scout agent with sonnet model to analyze performance
-```
-
-To include project-local agents, set `agentScope` to `"both"`:
-
-```
-Use agent scope "both" and run the project-specific linter agent
-```
-
-### Single Task
-
-Run a task with a specific model:
-
-```
-Use haiku to scan the codebase for authentication-related files, only allow grep and find tools
-```
-
-```
-Have gpt-4o-mini review this function for potential bugs
-```
-
-### Parallel Tasks
-
-Run multiple tasks at the same time:
+### Using Different Models
 
 ```
 In parallel:
-- Use haiku to find all database queries
-- Use haiku to scan for API endpoints  
-- Use sonnet to review the security model
+- Use haiku to find all TODO comments
+- Use sonnet to analyze the architecture
+- Use gpt-4o to review security
+```
+
+### Sequential Chain
+
+```
+First have haiku find all API endpoints, then have sonnet design tests for them
+```
+
+### Model Race
+
+```
+Race haiku vs gpt-4o-mini to summarize the README - first one wins
+```
+
+### Using Your Agents
+
+If you have agents defined in `~/.pi/agent/agents/`:
+
+```
+Use the scout agent to analyze the codebase
 ```
 
 ```
-Run these tasks concurrently with haiku:
-1. Count lines of code in src/
-2. Find TODO comments
-3. List all exported functions
+Run a chain: scout analyzes, then planner creates a plan
 ```
 
-With shared context:
+## Automatic Context
 
-```
-We're migrating from REST to GraphQL. In parallel, have haiku:
-- Find all REST endpoint definitions
-- Identify data fetching patterns
-- Look for API client usage
-```
+By default, all parallel tasks receive:
+- **Git branch name** - so agents know what branch they're on
+- **Git status** - which files are modified/staged
 
-### Chain Mode
+Agents run in the same directory and have full tool access, so they can:
+- Run `git diff` to see actual changes
+- Read any files they need
+- Use grep, find, etc.
 
-Run tasks sequentially, where each step can use the output from the previous:
+**You don't need to pre-fetch data** - just describe what agents should do.
 
-```
-Chain these steps:
-1. Use haiku with grep to find all error handling code
-2. Have sonnet analyze the patterns found and suggest improvements
-3. Have sonnet implement the top 3 suggestions
-```
+### Adding More Context
 
+Include specific files:
 ```
-First use haiku to scan for performance issues, then have sonnet create a detailed optimization plan based on the findings
+Review these files in parallel with haiku and sonnet:
+- contextFiles: ["src/main.rs", "src/lib.rs"]
 ```
 
-### Race Mode
-
-Have multiple models compete on the same task - first to finish wins:
-
+Include full git diff:
 ```
-Race haiku, gpt-4o-mini, and gemini-flash to summarize the README
+Review the branch changes with gitContext including the full diff
 ```
 
+Or in JSON:
+```json
+{
+  "tasks": [...],
+  "gitContext": { "diff": true, "log": 5 }
+}
 ```
-Have claude-haiku and gpt-4o-mini race to answer: what's the main purpose of this codebase?
-```
 
-### Context Features
-
-#### Auto-read Files
-
-Specify files to read automatically and include as context:
+### Disable Auto-Context
 
 ```json
 {
   "tasks": [...],
-  "contextFiles": ["src/config.ts", "README.md"]
+  "gitContext": false
 }
 ```
 
-#### Git Context
+## Modes
 
-Include git information automatically:
-
+### Single Task
+One task with a specific model:
 ```json
-{
-  "tasks": [...],
-  "gitContext": true
-}
+{ "task": "Count files in src/", "model": "claude-haiku-4-5" }
 ```
 
-This includes branch name, status, and changed files. For full diff:
-
-```json
-{
-  "gitContext": { "branch": true, "diff": true, "log": 5 }
-}
-```
-
-Options: `branch`, `status`, `diff`, `diffStats`, `log` (number of commits)
-
-#### Cross-Task References
-
-Reference earlier task outputs in parallel mode:
-
+### Parallel Tasks
+Multiple tasks running concurrently:
 ```json
 {
   "tasks": [
-    { "task": "Analyze the codebase structure", "name": "analyzer" },
-    { "task": "Based on {task_0}, suggest improvements", "name": "improver" }
+    { "task": "Find TODOs", "model": "haiku" },
+    { "task": "Review security", "model": "sonnet" }
   ]
 }
 ```
 
-When cross-references are detected, tasks run sequentially to allow substitution.
-
-## Parameters Reference
-
-### Single Mode
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `task` | string | Task to execute |
-| `agent` | string | Name of an existing agent to use (optional) |
-| `model` | string | Model to use (e.g., "claude-haiku-4-5"). Overrides agent default |
-| `tools` | string[] | Restrict to specific tools. Overrides agent default |
-| `systemPrompt` | string | Override system prompt. Overrides agent default |
-| `thinking` | number \| string | Thinking budget (tokens or "low"/"medium"/"high") |
-| `cwd` | string | Working directory |
-| `agentScope` | "user" \| "project" \| "both" | Agent discovery scope (default: "user") |
-
-### Parallel Mode
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `tasks` | TaskItem[] | Array of tasks to run (each can have `agent`, `model`, `tools`, etc.) |
-| `context` | string | Shared context string for all tasks |
-| `contextFiles` | string[] | File paths to auto-read and include as context |
-| `gitContext` | boolean \| object | Include git info (true = branch + status + diffStats) |
-| `maxConcurrency` | number | Max concurrent tasks (default: 4, max: 8) |
-| `agentScope` | "user" \| "project" \| "both" | Agent discovery scope (default: "user") |
-
-### Chain Mode
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `chain` | ChainStep[] | Sequential steps (each can have `agent`, `model`, `tools`, etc.) |
-| `agentScope` | "user" \| "project" \| "both" | Agent discovery scope (default: "user") |
-
-### Race Mode
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `race.task` | string | Task to race |
-| `race.models` | string[] | Models to compete |
-| `race.tools` | string[] | Tool restrictions |
-| `race.thinking` | number \| string | Thinking budget for all racers |
-
-## Output Features
-
-### Tool Usage Summary
-
-Results show which tools each subagent used:
-
-```
-### ✓ code-reviewer (13 turns, claude-haiku-4-5, $0.0042)
-**Tools used:** read×5, bash×3, grep×2
-
-The code looks good overall...
+### Chain
+Sequential steps where `{previous}` contains the last output:
+```json
+{
+  "chain": [
+    { "task": "Find all error handling code", "model": "haiku" },
+    { "task": "Analyze these patterns: {previous}", "model": "sonnet" }
+  ]
+}
 ```
 
-### Cost Tracking
-
-Per-task and total costs are displayed:
-
-```
-## Parallel: 3/3 succeeded | Total cost: $0.0156
-```
-
-### Full Output Files
-
-When output is truncated (>2000 chars), the full output is saved to a temp file:
-
-```
-... [truncated, full output: /tmp/parallel-code_reviewer-1738793234567.md]
+### Race
+First model to complete wins:
+```json
+{
+  "race": {
+    "task": "Summarize the README",
+    "models": ["haiku", "gpt-4o-mini", "gemini-flash"]
+  }
+}
 ```
 
-## Thinking Levels
+## Cross-Task References
 
-You can specify thinking budget per task:
+In parallel mode, reference earlier results with `{task_N}`:
+
+```json
+{
+  "tasks": [
+    { "task": "Analyze the code structure" },
+    { "task": "Based on {task_0}, suggest improvements" }
+  ]
+}
+```
+
+When references are detected, tasks run sequentially.
+
+## Output
+
+Results show what each agent did:
 
 ```
-Have sonnet think deeply about this architecture problem (use high thinking)
+## Parallel: 2/2 succeeded | Total cost: $0.0089
+
+### ✓ haiku-review (8 turns, claude-haiku-4-5, $0.0034)
+**Tools used:** read×3, bash×2, grep×1
+
+The code looks good. Main findings:
+- Line 42: potential null pointer...
+
+---
+
+### ✓ sonnet-review (5 turns, claude-sonnet-4-5, $0.0055)
+**Tools used:** read×4, bash×1
+
+Architecture review complete...
 ```
 
-```
-Use opus with extended thinking to review this complex algorithm
-```
+Long outputs are saved to temp files with a path shown.
 
-Supported values:
-- Numbers: Token budget (e.g., `10000`, `50000`)
-- Strings: `"low"`, `"medium"`, `"high"`
+## Parameters
 
-## Model Names
+### Common Options
 
-You can use short names - the LLM will understand:
+| Parameter | Description |
+|-----------|-------------|
+| `model` | Model name (e.g., "haiku", "claude-sonnet-4-5", "gpt-4o") |
+| `agent` | Use an existing agent by name |
+| `tools` | Restrict available tools (e.g., `["read", "grep"]`) |
+| `thinking` | Thinking budget: `"low"`, `"medium"`, `"high"`, or token count |
+| `agentScope` | Where to find agents: `"user"`, `"project"`, or `"both"` |
 
-- `haiku` → claude-haiku-4-5
-- `sonnet` → claude-sonnet-4-5
-- `opus` → claude-opus-4
-- `gpt-4o-mini`, `gpt-4o`
-- `gemini-flash`, `gemini-pro`
+### Context Options (Parallel Mode)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `gitContext` | `{branch: true, status: true}` | Git info to include |
+| `contextFiles` | none | Files to read and include |
+| `context` | none | Manual context string |
+
+### Git Context Options
+
+| Option | Description |
+|--------|-------------|
+| `branch` | Current branch name |
+| `status` | Git status (modified files) |
+| `diffStats` | Summary of changes (files changed, insertions, deletions) |
+| `diff` | Full git diff |
+| `log` | Last N commit messages (e.g., `log: 5`) |
+
+## Model Shortcuts
+
+Use short names - they're automatically expanded:
+
+| Short | Full |
+|-------|------|
+| `haiku` | claude-haiku-4-5 |
+| `sonnet` | claude-sonnet-4-5 |
+| `opus` | claude-opus-4 |
+| `gpt-4o-mini` | gpt-4o-mini |
+| `gpt-4o` | gpt-4o |
 
 ## Development
 
 ```bash
-# Clone the repo
 git clone https://github.com/messense/pi-parallel-agents
 cd pi-parallel-agents
-
-# Install dependencies
 npm install
-
-# Test locally
-pi -e ./src/index.ts
+pi -e ./src/index.ts  # Test locally
 ```
-
-## How It Works
-
-1. Each task spawns a separate `pi` subprocess with `--mode json`
-2. Progress is streamed via JSON events from the subprocess
-3. Context is built from files, git info, and user-provided strings
-4. Results include tool usage, costs, and full output files
-5. Session persistence works automatically via `details`
 
 ## License
 

@@ -444,10 +444,11 @@ export default function (pi: ExtensionAPI) {
         );
         
         // Build shared context from all sources
+        // Default to basic git info (branch + status) if nothing specified
         const sharedContext = buildContext(cwd, {
           context: params.context,
           contextFiles: params.contextFiles,
-          gitContext: params.gitContext,
+          gitContext: params.gitContext ?? { branch: true, status: true },
         });
         
         // Validate all agents exist before starting
