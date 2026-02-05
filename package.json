@@ -1,0 +1,41 @@
+{
+  "name": "pi-parallel-agents",
+  "version": "0.1.0",
+  "description": "Dynamic parallel agent execution for pi - run multiple agents with different models without pre-defining configurations",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "ai",
+    "agent",
+    "parallel",
+    "multi-agent"
+  ],
+  "author": "messense",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/messense/pi-parallel-agents"
+  },
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "pi": {
+    "extensions": [
+      "src/index.ts"
+    ]
+  }
+}
