@@ -112,7 +112,7 @@ export default function (pi: ExtensionAPI) {
       "- Parallel: { tasks: [{task, model?, name?}, ...], maxConcurrency? }",
       "- Chain: { chain: [{task, model?}, ...] } - sequential with {previous} placeholder",
       "- Race: { race: {task, models: [...]} } - first to complete wins",
-      "- Team: { team: {objective, members: [{role, model?}], tasks: [{id, task, assignee?, depends?}]} } - DAG-based team coordination",
+      "- Team: { team: {objective, members: [{role, model?}], tasks: [{id, task, assignee?, depends?, review?}]} } - DAG-based team coordination with optional iterative refinement",
       "Model examples: claude-haiku-4-5, gpt-4o-mini, claude-sonnet-4-5",
       "Use `provider` to specify the provider (e.g., moonshot, openai, google) when the model name alone is ambiguous.",
       "",
@@ -125,7 +125,7 @@ export default function (pi: ExtensionAPI) {
       "- contextFiles: ['path/to/file.rs'] - auto-read and include file contents",
       "- context: 'string' - manual context string",
       "",
-      "Team mode: Coordinate a team of agents with task dependencies.",
+      "Team mode: Coordinate a team of agents with task dependencies and iterative review loops.",
       "- members define roles with model/tools/systemPrompt",
       "- tasks form a DAG with `depends` arrays and `{task:id}` references",
       "- Independent tasks run in parallel; dependent tasks wait",
@@ -781,7 +781,11 @@ export default function (pi: ExtensionAPI) {
           }
 
           const results = dagResult.results;
-          const successCount = results.filter((r) => r.exitCode === 0).length;
+          const primaryTaskCount = teamTasks.length;
+          const successCount = teamTasks.filter((t) => {
+            const node = dagNodes.get(t.id);
+            return node?.status === "completed";
+          }).length;
 
           // Build DAG info for details
           const dagInfo: ParallelToolDetails["dagInfo"] = {
@@ -797,12 +801,24 @@ export default function (pi: ExtensionAPI) {
                 assignee: t.assignee,
                 depends: t.depends ?? [],
                 status: node?.status ?? "pending",
+                iteration: node?.iteration,
+                maxIterations: t.review?.maxIterations,
               };
             }),
           };
 
-          // Build summaries
-          const summaries = results.map((r, idx) => {
+          // Build summaries — only for primary task results (skip review/revision sub-results)
+          const primaryResults = results.filter((r) => {
+            // Primary results are those whose ID matches a task ID directly
+            return teamTasks.some((t) => t.id === r.id);
+          });
+
+          // Also include review/revision results for reporting
+          const reviewResults = results.filter((r) => {
+            return r.id.includes(":review:") || r.id.includes(":revision:");
+          });
+
+          const summaries = primaryResults.map((r, idx) => {
             const output = r.output.trim();
             const stats: string[] = [];
             if (r.usage.turns > 0) stats.push(`${r.usage.turns} turns`);
@@ -814,6 +830,17 @@ export default function (pi: ExtensionAPI) {
             // Find assignee info
             const taskDef = teamTasks.find((t) => t.id === r.id);
             const assigneeInfo = taskDef?.assignee ? `[${taskDef.assignee}] ` : "";
+
+            // Check if this task went through review iterations
+            const dagNode = dagNodes.get(r.id);
+            let iterationInfo = "";
+            if (dagNode?.iteration && dagNode.iteration > 1) {
+              iterationInfo = ` 🔄 ${dagNode.iteration} iterations`;
+            }
+            if (dagNode?.reviewHistory && dagNode.reviewHistory.length > 0) {
+              const lastReview = dagNode.reviewHistory[dagNode.reviewHistory.length - 1];
+              iterationInfo += lastReview.approved ? " ✅ approved" : " ⚠️ max iterations reached";
+            }
 
             // Include output - up to 2000 chars per task
             const maxLen = 2000;
@@ -833,7 +860,20 @@ export default function (pi: ExtensionAPI) {
               outputSection = output || "(no output)";
             }
 
-            return `### ${status} ${assigneeInfo}${r.name || r.id}${statsStr}\n\n${outputSection}`;
+            // Add review history summary if available
+            let reviewSection = "";
+            if (dagNode?.reviewHistory && dagNode.reviewHistory.length > 0) {
+              reviewSection = "\n\n#### Review History\n";
+              for (const rh of dagNode.reviewHistory) {
+                const icon = rh.approved ? "✅" : "❌";
+                const feedbackPreview = rh.reviewerOutput.length > 300
+                  ? rh.reviewerOutput.slice(0, 300) + "..."
+                  : rh.reviewerOutput;
+                reviewSection += `\n**Iteration ${rh.iteration}** ${icon}\n${feedbackPreview}\n`;
+              }
+            }
+
+            return `### ${status} ${assigneeInfo}${r.name || r.id}${iterationInfo}${statsStr}\n\n${outputSection}${reviewSection}`;
           });
 
           // Calculate total cost
@@ -850,7 +890,7 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text",
-                text: `## Team: ${successCount}/${teamTasks.length} tasks succeeded${dagResult.aborted ? " (aborted)" : ""}${costInfo}\n\n**Objective:** ${objective}${blockedInfo}\n\n${summaries.join("\n\n---\n\n")}`,
+                text: `## Team: ${successCount}/${primaryTaskCount} tasks succeeded${dagResult.aborted ? " (aborted)" : ""}${costInfo}\n\n**Objective:** ${objective}${blockedInfo}\n\n${summaries.join("\n\n---\n\n")}`,
               },
             ],
             details: {

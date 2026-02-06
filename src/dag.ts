@@ -7,7 +7,7 @@
  * for review before continuing.
  */
 
-import type { TeamTask, TaskResult, TaskProgress } from "./types.js";
+import type { TeamTask, TaskResult, TaskProgress, ReviewConfig } from "./types.js";
 import { runAgent } from "./executor.js";
 import type { AgentConfig } from "./agents.js";
 
@@ -24,9 +24,20 @@ export interface DagNode {
   /** IDs of tasks that depend on this */
   dependedBy: string[];
   /** Current status */
-  status: "pending" | "blocked" | "ready" | "running" | "completed" | "failed" | "awaiting_approval";
+  status: "pending" | "blocked" | "ready" | "running" | "completed" | "failed" | "awaiting_approval" | "reviewing" | "revising";
   /** Result once completed */
   result?: TaskResult;
+  /** Current iteration (1-based), set when task has review config */
+  iteration?: number;
+  /** History of review feedback for iterative refinement */
+  reviewHistory?: Array<{
+    iteration: number;
+    workerOutput: string;
+    reviewerOutput: string;
+    approved: boolean;
+  }>;
+  /** All results from iterations (worker + reviewer runs) */
+  iterationResults?: TaskResult[];
 }
 
 export interface TeamMember {
@@ -114,6 +125,10 @@ export function buildDag(
   for (const [id, node] of nodes) {
     if (node.task.assignee && !members.has(node.task.assignee)) {
       throw new Error(`Task "${id}" assigned to unknown member "${node.task.assignee}"`);
+    }
+    // Validate review assignee
+    if (node.task.review?.assignee && !members.has(node.task.review.assignee)) {
+      throw new Error(`Task "${id}" review assigned to unknown member "${node.task.review.assignee}"`);
     }
   }
 
@@ -205,6 +220,15 @@ export function isDagComplete(nodes: Map<string, DagNode>): boolean {
 }
 
 /**
+ * Check if there's a task awaiting review or revision.
+ */
+export function getReviewableTasks(nodes: Map<string, DagNode>): DagNode[] {
+  return [...nodes.values()].filter(
+    (n) => n.status === "reviewing"
+  );
+}
+
+/**
  * Check if there's a task awaiting approval.
  */
 export function getPendingApproval(nodes: Map<string, DagNode>): DagNode | undefined {
@@ -215,8 +239,136 @@ export function getPendingApproval(nodes: Map<string, DagNode>): DagNode | undef
 // Task Text Resolution
 // ============================================================================
 
+/** Default max review iterations */
+const DEFAULT_MAX_ITERATIONS = 3;
+
+/** The system prompt addition for reviewers */
+const REVIEWER_INSTRUCTIONS = `
+
+## Review Protocol
+
+You are reviewing work output from a team member. Evaluate the output carefully.
+
+**You MUST end your response with one of these two markers on its own line:**
+
+- \`APPROVED\` — if the work meets the requirements and is ready to use
+- \`REVISION_NEEDED\` — if the work needs changes, followed by your specific feedback
+
+Example approved response:
+\`\`\`
+The implementation looks correct and complete. Good error handling and clear code structure.
+
+APPROVED
+\`\`\`
+
+Example revision response:
+\`\`\`
+The implementation has issues:
+1. Missing error handling for edge case X
+2. The function Y should validate inputs
+
+REVISION_NEEDED
+\`\`\`
+`;
+
 /**
- * Resolve `{task:id}` references in task text with completed task outputs.
+ * Parse a reviewer's output to determine if the work was approved.
+ * Returns { approved, feedback }.
+ */
+export function parseReviewDecision(output: string): { approved: boolean; feedback: string } {
+  const trimmed = output.trim();
+  const lines = trimmed.split("\n");
+
+  // Check last non-empty lines for markers
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    if (line === "APPROVED") {
+      // Everything before the marker is the feedback/rationale
+      const feedback = lines.slice(0, i).join("\n").trim();
+      return { approved: true, feedback };
+    }
+    if (line === "REVISION_NEEDED") {
+      const feedback = lines.slice(0, i).join("\n").trim();
+      return { approved: false, feedback };
+    }
+    // Only check the last non-empty line
+    break;
+  }
+
+  // If no explicit marker found, check for the words in the last portion
+  const lastChunk = trimmed.slice(-200).toLowerCase();
+  if (lastChunk.includes("approved") && !lastChunk.includes("not approved") && !lastChunk.includes("revision")) {
+    return { approved: true, feedback: trimmed };
+  }
+
+  // Default: treat as needing revision with the full output as feedback
+  return { approved: false, feedback: trimmed };
+}
+
+/**
+ * Build the review task prompt.
+ */
+function buildReviewPrompt(
+  reviewConfig: ReviewConfig,
+  originalTask: string,
+  workerOutput: string,
+  iteration: number,
+  maxIterations: number,
+  previousFeedback?: string
+): string {
+  const basePrompt = reviewConfig.task
+    ? reviewConfig.task
+        .replace(/\{output\}/g, workerOutput)
+        .replace(/\{task\}/g, originalTask)
+    : `Review the following work output and determine if it meets the requirements of the original task.\n\n## Original Task\n\n${originalTask}\n\n## Work Output\n\n${workerOutput}`;
+
+  let prompt = basePrompt;
+  prompt += `\n\n---\nThis is review iteration ${iteration}/${maxIterations}.`;
+
+  if (previousFeedback) {
+    prompt += `\n\n## Previous Review Feedback\n\n${previousFeedback}`;
+  }
+
+  if (iteration >= maxIterations) {
+    prompt += `\n\n**This is the final iteration.** Please either approve the work or provide final feedback. The work will be accepted after this review regardless.`;
+  }
+
+  return prompt;
+}
+
+/**
+ * Build the revision task prompt for a worker re-doing their task.
+ */
+function buildRevisionPrompt(
+  originalTask: string,
+  reviewFeedback: string,
+  iteration: number,
+  maxIterations: number,
+  previousOutput: string
+): string {
+  return `${originalTask}
+
+---
+
+## Revision Required (Attempt ${iteration}/${maxIterations})
+
+Your previous output was reviewed and needs changes. Here is your previous output and the reviewer's feedback:
+
+### Your Previous Output
+
+${previousOutput}
+
+### Reviewer Feedback
+
+${reviewFeedback}
+
+Please revise your work to address the reviewer's feedback. Focus on the specific issues mentioned.`;
+}
+
+/**
+ * Resolve \`{task:id}\` references in task text with completed task outputs.
  */
 export function resolveTaskReferences(
   text: string,
@@ -290,12 +442,218 @@ export async function executeDag(
         if (node.status === "blocked") p.status = "aborted";
         else if (node.status === "ready") p.status = "pending";
         else if (node.status === "awaiting_approval") p.status = "running";
+        else if (node.status === "reviewing") p.status = "running";
+        else if (node.status === "revising") p.status = "running";
       }
     }
     onProgress?.(nodes, [...progressMap.values()]);
   };
 
   emitProgress();
+
+  // Helper: build shared context for a task
+  function buildTaskContext(node: DagNode): string | undefined {
+    const contextParts: string[] = [];
+    if (objective) {
+      contextParts.push(`## Team Objective\n\n${objective}`);
+    }
+    if (sharedContext) {
+      contextParts.push(sharedContext);
+    }
+    if (workspacePath) {
+      contextParts.push(`## Shared Workspace\n\nThe team workspace directory is: ${workspacePath}\nYou can read artifacts from other team members there, and write your own artifacts for others to use.`);
+    }
+
+    // Add dependency outputs as context
+    for (const depId of node.dependsOn) {
+      const depNode = nodes.get(depId);
+      if (depNode?.result?.output) {
+        const depName = depNode.task.assignee
+          ? `${depNode.task.assignee} (${depId})`
+          : depId;
+        contextParts.push(
+          `## Output from prerequisite task "${depName}"\n\n${depNode.result.output}`
+        );
+      }
+    }
+
+    return contextParts.length > 0 ? contextParts.join("\n\n---\n\n") : undefined;
+  }
+
+  // Helper: run the review cycle for a node that just produced output
+  async function runReviewCycle(node: DagNode): Promise<void> {
+    const review = node.task.review!;
+    const maxIter = review.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    const reviewMember = members.get(review.assignee);
+    const taskId = node.task.id;
+
+    if (!node.iteration) node.iteration = 1;
+    if (!node.reviewHistory) node.reviewHistory = [];
+    if (!node.iterationResults) node.iterationResults = [];
+
+    while (node.iteration <= maxIter) {
+      if (signal?.aborted) return;
+
+      const workerOutput = node.result?.output ?? "";
+      const previousFeedback = node.reviewHistory.length > 0
+        ? node.reviewHistory[node.reviewHistory.length - 1].reviewerOutput
+        : undefined;
+
+      // --- Run reviewer ---
+      node.status = "reviewing";
+      const reviewProgressId = `${taskId}:review:${node.iteration}`;
+      progressMap.set(reviewProgressId, {
+        id: reviewProgressId,
+        name: `${review.assignee}:review(${taskId}#${node.iteration})`,
+        status: "running",
+        task: `Reviewing ${taskId} (iteration ${node.iteration})`,
+        model: review.model ?? reviewMember?.model,
+        recentTools: [],
+        recentOutput: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: 0,
+      });
+      emitProgress();
+
+      const reviewPrompt = buildReviewPrompt(
+        review,
+        node.task.task,
+        workerOutput,
+        node.iteration,
+        maxIter,
+        previousFeedback
+      );
+
+      // Build reviewer system prompt with review protocol
+      const reviewerSystemPrompt = (reviewMember?.systemPrompt ?? "") + REVIEWER_INSTRUCTIONS;
+
+      const reviewResult = await runAgent({
+        task: reviewPrompt,
+        cwd,
+        provider: review.provider ?? reviewMember?.provider,
+        model: review.model ?? reviewMember?.model,
+        tools: review.tools ?? reviewMember?.tools,
+        systemPrompt: reviewerSystemPrompt,
+        thinking: reviewMember?.thinking,
+        context: buildTaskContext(node),
+        id: reviewProgressId,
+        name: `${review.assignee}:review(${taskId})`,
+        signal,
+        onProgress: (p) => {
+          progressMap.set(reviewProgressId, p);
+          emitProgress();
+        },
+      });
+
+      node.iterationResults!.push(reviewResult);
+      allResults.push(reviewResult);
+
+      // Update review progress
+      const rp = progressMap.get(reviewProgressId);
+      if (rp) rp.status = reviewResult.exitCode === 0 ? "completed" : "failed";
+
+      if (reviewResult.exitCode !== 0 || reviewResult.aborted) {
+        // Review failed — accept the worker's current output
+        node.status = "completed";
+        const p = progressMap.get(taskId);
+        if (p) p.status = "completed";
+        emitProgress();
+        return;
+      }
+
+      // Parse review decision
+      const decision = parseReviewDecision(reviewResult.output);
+
+      node.reviewHistory!.push({
+        iteration: node.iteration,
+        workerOutput,
+        reviewerOutput: reviewResult.output,
+        approved: decision.approved,
+      });
+
+      if (decision.approved || node.iteration >= maxIter) {
+        // Approved or max iterations reached — task is done
+        node.status = "completed";
+        const p = progressMap.get(taskId);
+        if (p) p.status = "completed";
+        emitProgress();
+        return;
+      }
+
+      // --- Revision needed: re-run worker ---
+      node.iteration++;
+      node.status = "revising";
+      const revisionProgressId = `${taskId}:revision:${node.iteration}`;
+
+      // Update the main task progress to show it's being revised
+      const mainProgress = progressMap.get(taskId);
+      if (mainProgress) {
+        mainProgress.status = "running";
+        mainProgress.name = `${node.assignee?.role ?? taskId}:${taskId}#${node.iteration}`;
+      }
+      progressMap.set(revisionProgressId, {
+        id: revisionProgressId,
+        name: `${node.assignee?.role ?? taskId}:${taskId}#${node.iteration}`,
+        status: "running",
+        task: `Revising ${taskId} (iteration ${node.iteration})`,
+        model: node.assignee?.model,
+        recentTools: [],
+        recentOutput: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: 0,
+      });
+      emitProgress();
+
+      const revisionPrompt = buildRevisionPrompt(
+        resolveTaskReferences(node.task.task, nodes),
+        decision.feedback,
+        node.iteration,
+        maxIter,
+        workerOutput
+      );
+
+      const revisionResult = await runAgent({
+        task: revisionPrompt,
+        cwd,
+        provider: node.assignee?.provider,
+        model: node.assignee?.model,
+        tools: node.assignee?.tools,
+        systemPrompt: node.assignee?.systemPrompt,
+        thinking: node.assignee?.thinking,
+        context: buildTaskContext(node),
+        id: revisionProgressId,
+        name: node.assignee?.role ? `${node.assignee.role}:${taskId}` : taskId,
+        signal,
+        onProgress: (p) => {
+          progressMap.set(revisionProgressId, p);
+          emitProgress();
+        },
+      });
+
+      node.iterationResults!.push(revisionResult);
+      allResults.push(revisionResult);
+
+      // Update revision progress
+      const revP = progressMap.get(revisionProgressId);
+      if (revP) revP.status = revisionResult.exitCode === 0 ? "completed" : "failed";
+
+      if (revisionResult.exitCode !== 0 || revisionResult.aborted) {
+        // Revision failed — mark task as failed
+        node.status = "failed";
+        node.result = revisionResult;
+        const p = progressMap.get(taskId);
+        if (p) p.status = "failed";
+        emitProgress();
+        return;
+      }
+
+      // Update the node's result with the new output
+      node.result = revisionResult;
+      // Continue loop → will review again
+    }
+  }
 
   // Main execution loop
   while (!isDagComplete(nodes)) {
@@ -358,32 +716,7 @@ export async function executeDag(
       // Resolve task text with references to completed tasks
       const resolvedTask = resolveTaskReferences(node.task.task, nodes);
 
-      // Build context
-      const contextParts: string[] = [];
-      if (objective) {
-        contextParts.push(`## Team Objective\n\n${objective}`);
-      }
-      if (sharedContext) {
-        contextParts.push(sharedContext);
-      }
-      if (workspacePath) {
-        contextParts.push(`## Shared Workspace\n\nThe team workspace directory is: ${workspacePath}\nYou can read artifacts from other team members there, and write your own artifacts for others to use.`);
-      }
-
-      // Add dependency outputs as context
-      for (const depId of node.dependsOn) {
-        const depNode = nodes.get(depId);
-        if (depNode?.result?.output) {
-          const depName = depNode.task.assignee
-            ? `${depNode.task.assignee} (${depId})`
-            : depId;
-          contextParts.push(
-            `## Output from prerequisite task "${depName}"\n\n${depNode.result.output}`
-          );
-        }
-      }
-
-      const context = contextParts.length > 0 ? contextParts.join("\n\n---\n\n") : undefined;
+      const context = buildTaskContext(node);
 
       // Determine tools - restrict to read-only if requires approval
       let tools = member?.tools;
@@ -428,6 +761,14 @@ export async function executeDag(
       } else if (node.task.requiresApproval) {
         // Task completed but needs approval before dependents can proceed
         node.status = "awaiting_approval";
+      } else if (node.task.review) {
+        // Task has a review config — enter review cycle
+        // Initialize iteration tracking
+        node.iteration = 1;
+        node.reviewHistory = [];
+        node.iterationResults = [result];
+        // Don't mark as completed yet — run the review loop
+        await runReviewCycle(node);
       } else {
         node.status = "completed";
         const p = progressMap.get(taskId);

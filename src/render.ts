@@ -121,6 +121,8 @@ export function renderCall(args: ParallelParams, theme: Theme): Text {
       let dagSummary = `${tasks.length} tasks`;
       if (withDeps > 0) dagSummary += `, ${withDeps} with dependencies`;
       if (withApproval > 0) dagSummary += `, ${withApproval} requiring approval`;
+      const withReview = tasks.filter((t) => t.review).length;
+      if (withReview > 0) dagSummary += `, ${withReview} with review`;
       text += `\n  ${theme.fg("muted", "DAG:")} ${theme.fg("dim", dagSummary)}`;
     }
 
@@ -433,7 +435,10 @@ export function renderResult(
         const depsStr = t.depends.length > 0
           ? theme.fg("dim", ` ← ${t.depends.join(", ")}`)
           : "";
-        text += `\n  ${statusIcon} ${assigneeStr}${t.id}${depsStr}`;
+        const iterStr = t.iteration && t.iteration > 1
+          ? theme.fg("warning", ` 🔄${t.iteration}${t.maxIterations ? `/${t.maxIterations}` : ""}`)
+          : "";
+        text += `\n  ${statusIcon} ${assigneeStr}${t.id}${iterStr}${depsStr}`;
       }
     }
 

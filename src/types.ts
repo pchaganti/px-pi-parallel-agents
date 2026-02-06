@@ -98,6 +98,8 @@ export interface ParallelToolDetails {
       assignee?: string;
       depends: string[];
       status: string;
+      iteration?: number;
+      maxIterations?: number;
     }>;
     pendingApproval?: {
       taskId: string;
@@ -242,6 +244,29 @@ export const TeamMemberSchema = Type.Object({
 
 export type TeamMemberDef = Static<typeof TeamMemberSchema>;
 
+/** Schema for review/refinement configuration on a team task */
+export const ReviewConfigSchema = Type.Object({
+  assignee: Type.String({
+    description: 'Role name of the reviewing member. Must be defined in the team members.',
+  }),
+  task: Type.Optional(
+    Type.String({
+      description: 'Review task prompt. Defaults to evaluating the task output. Use {output} for the worker output and {task} for the original task.',
+    })
+  ),
+  maxIterations: Type.Optional(
+    Type.Number({
+      description: 'Maximum review cycles before auto-accepting (default: 3)',
+      default: 3,
+    })
+  ),
+  provider: Type.Optional(Type.String({ description: 'Provider for the reviewer.' })),
+  model: Type.Optional(Type.String({ description: 'Model for the reviewer. Overrides member default.' })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: 'Tools for the reviewer.' })),
+});
+
+export type ReviewConfig = Static<typeof ReviewConfigSchema>;
+
 /** Schema for a team task with dependencies */
 export const TeamTaskSchema = Type.Object({
   id: Type.String({ description: "Unique task identifier (used in depends and {task:id} references)" }),
@@ -257,6 +282,7 @@ export const TeamTaskSchema = Type.Object({
       description: "If true, task runs in read-only mode and its output is returned for review before dependents proceed",
     })
   ),
+  review: Type.Optional(ReviewConfigSchema),
 });
 
 export type TeamTask = Static<typeof TeamTaskSchema>;

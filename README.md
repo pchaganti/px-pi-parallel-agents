@@ -206,9 +206,51 @@ Coordinate agents with task dependencies (DAG-based execution):
 **Key features:**
 - **Task dependencies**: `depends` array specifies prerequisites; independent tasks run in parallel
 - **Named references**: Use `{task:id}` in task text to include a dependency's output
+- **Iterative refinement**: Add `review` to a task for automatic worker→reviewer loops with feedback
 - **Plan approval**: Set `requiresApproval: true` to pause for review before dependents proceed
 - **Roles**: Members have roles; multiple tasks can be assigned to the same role
 - **Simple mode**: Omit `tasks` and give each member a `task` field — they all run in parallel
+
+### Iterative Refinement
+
+Add a `review` config to any task to enable automatic review loops. A reviewer evaluates the worker's output and either approves it or sends revision feedback:
+
+```json
+{
+  "team": {
+    "objective": "Write a high-quality haiku about TypeScript",
+    "members": [
+      { "role": "writer", "model": "gpt-4o" },
+      { "role": "critic", "model": "gpt-4.1" }
+    ],
+    "tasks": [
+      {
+        "id": "write-haiku",
+        "assignee": "writer",
+        "task": "Write a haiku (5-7-5 syllables) about TypeScript",
+        "review": {
+          "assignee": "critic",
+          "maxIterations": 3,
+          "task": "Check if this haiku has exactly 5-7-5 syllable pattern. Count carefully. {output}"
+        }
+      }
+    ]
+  }
+}
+```
+
+**How it works:**
+1. Worker runs the task and produces output
+2. Reviewer evaluates using the `review.task` prompt (use `{output}` for worker output, `{task}` for original task)
+3. Reviewer ends with `APPROVED` or `REVISION_NEEDED`
+4. If revision needed, worker re-runs with the reviewer's feedback
+5. Loop continues until approved or `maxIterations` reached (default: 3)
+
+**Review config options:**
+- `assignee` (required): Role of the reviewing member
+- `task`: Custom review prompt. Defaults to evaluating against the original task
+- `maxIterations`: Max review cycles before auto-accepting (default: 3)
+- `model`, `provider`, `tools`: Override reviewer's defaults for this review
 
 ## Cross-Task References
 
