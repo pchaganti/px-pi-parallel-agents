@@ -89,6 +89,44 @@ function getStatusIcon(
 // ============================================================================
 
 export function renderCall(args: ParallelParams, theme: Theme): Text {
+  // Team mode
+  if (args.team) {
+    const { objective, members, tasks } = args.team;
+    let text =
+      theme.fg("toolTitle", theme.bold("parallel ")) +
+      theme.fg("accent", `team (${members.length} members`);
+    if (tasks && tasks.length > 0) {
+      text += `, ${tasks.length} tasks`;
+    }
+    text += ")";
+
+    // Show objective
+    const objPreview = objective.length > 60 ? `${objective.slice(0, 60)}...` : objective;
+    text += `\n  ${theme.fg("muted", "objective:")} ${theme.fg("dim", objPreview)}`;
+
+    // Show members
+    for (const m of members.slice(0, 4)) {
+      const modelInfo = m.model ? theme.fg("muted", ` [${m.model}]`) : "";
+      const agentInfo = m.agent ? theme.fg("muted", ` (${m.agent})`) : "";
+      text += `\n  ${theme.fg("accent", m.role)}${agentInfo}${modelInfo}`;
+    }
+    if (members.length > 4) {
+      text += `\n  ${theme.fg("muted", `... +${members.length - 4} more`)}`;
+    }
+
+    // Show task DAG summary
+    if (tasks && tasks.length > 0) {
+      const withDeps = tasks.filter((t) => t.depends && t.depends.length > 0).length;
+      const withApproval = tasks.filter((t) => t.requiresApproval).length;
+      let dagSummary = `${tasks.length} tasks`;
+      if (withDeps > 0) dagSummary += `, ${withDeps} with dependencies`;
+      if (withApproval > 0) dagSummary += `, ${withApproval} requiring approval`;
+      text += `\n  ${theme.fg("muted", "DAG:")} ${theme.fg("dim", dagSummary)}`;
+    }
+
+    return new Text(text, 0, 0);
+  }
+
   // Chain mode
   if (args.chain && args.chain.length > 0) {
     let text =
@@ -255,12 +293,26 @@ export function renderResult(
   if (isPartial && details.progress) {
     const running = details.progress.filter((p) => p.status === "running").length;
     const completed = details.progress.filter((p) => p.status === "completed").length;
+    const blocked = details.progress.filter((p) => p.status === "aborted").length; // "aborted" used for blocked in team mode
     const total = details.progress.length;
 
+    const modeLabel = details.mode === "team" ? "team" : "parallel";
     let text =
       theme.fg("warning", "⏳ ") +
-      theme.fg("toolTitle", theme.bold("parallel ")) +
+      theme.fg("toolTitle", theme.bold(`${modeLabel} `)) +
       theme.fg("accent", `${completed}/${total} done, ${running} running`);
+
+    if (blocked > 0) {
+      text += theme.fg("warning", `, ${blocked} blocked`);
+    }
+
+    // Show DAG info for team mode
+    if (details.mode === "team" && details.dagInfo?.objective) {
+      const objPreview = details.dagInfo.objective.length > 50
+        ? `${details.dagInfo.objective.slice(0, 50)}...`
+        : details.dagInfo.objective;
+      text += `\n${theme.fg("muted", "Objective:")} ${theme.fg("dim", objPreview)}`;
+    }
 
     for (const prog of details.progress) {
       text += `\n\n${renderProgress(prog, theme)}`;
@@ -339,6 +391,77 @@ export function renderResult(
     }
 
     text += `\n\n${theme.fg("dim", formatDuration(details.totalDurationMs))}`;
+
+    return new Text(text, 0, 0);
+  }
+
+  // Team mode
+  if (details.mode === "team") {
+    const successCount = results.filter((r) => r.exitCode === 0).length;
+    const icon =
+      successCount === results.length
+        ? theme.fg("success", "✓")
+        : successCount > 0
+          ? theme.fg("warning", "◐")
+          : theme.fg("error", "✗");
+
+    let text =
+      icon +
+      " " +
+      theme.fg("toolTitle", theme.bold("team ")) +
+      theme.fg("accent", `${successCount}/${results.length} tasks`);
+
+    if (details.dagInfo?.objective) {
+      const objPreview = details.dagInfo.objective.length > 60
+        ? `${details.dagInfo.objective.slice(0, 60)}...`
+        : details.dagInfo.objective;
+      text += `\n${theme.fg("muted", "Objective:")} ${theme.fg("dim", objPreview)}`;
+    }
+
+    // Show DAG structure with status
+    if (details.dagInfo?.tasks) {
+      text += `\n\n${theme.fg("muted", "Task DAG:")}`;
+      for (const t of details.dagInfo.tasks) {
+        const statusIcon = t.status === "completed"
+          ? theme.fg("success", "✓")
+          : t.status === "failed"
+            ? theme.fg("error", "✗")
+            : t.status === "blocked"
+              ? theme.fg("warning", "⊘")
+              : theme.fg("dim", "○");
+        const assigneeStr = t.assignee ? theme.fg("accent", `[${t.assignee}]`) + " " : "";
+        const depsStr = t.depends.length > 0
+          ? theme.fg("dim", ` ← ${t.depends.join(", ")}`)
+          : "";
+        text += `\n  ${statusIcon} ${assigneeStr}${t.id}${depsStr}`;
+      }
+    }
+
+    // Show results
+    const displayResults = expanded ? results : results.slice(0, COLLAPSED_ITEM_COUNT);
+    for (const r of displayResults) {
+      text += `\n\n${renderTaskResult(r, expanded, theme)}`;
+    }
+
+    if (!expanded && results.length > COLLAPSED_ITEM_COUNT) {
+      text += `\n\n${theme.fg("muted", `... +${results.length - COLLAPSED_ITEM_COUNT} more (Ctrl+O to expand)`)}`;
+    }
+
+    // Show blocked tasks
+    if (details.dagInfo?.tasks) {
+      const blocked = details.dagInfo.tasks.filter((t) => t.status === "blocked");
+      if (blocked.length > 0) {
+        text += `\n\n${theme.fg("warning", `⊘ ${blocked.length} task(s) blocked:`)} ${theme.fg("muted", blocked.map((t) => t.id).join(", "))}`;
+      }
+    }
+
+    // Total usage
+    const totalUsage = formatUsageStats(details.usage);
+    if (totalUsage) {
+      text += `\n\n${theme.fg("dim", `Total: ${totalUsage}`)}`;
+    }
+
+    text += `\n${theme.fg("dim", formatDuration(details.totalDurationMs))}`;
 
     return new Text(text, 0, 0);
   }

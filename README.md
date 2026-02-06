@@ -5,7 +5,8 @@ A [pi](https://github.com/badlogic/pi-mono) extension for running multiple AI ag
 ## Features
 
 - **Multiple Models**: Run tasks with different models (haiku, sonnet, gpt-4o, etc.)
-- **Four Modes**: Single task, parallel tasks, sequential chains, or model races
+- **Five Modes**: Single task, parallel tasks, sequential chains, model races, or team coordination
+- **Team Mode**: DAG-based task coordination with dependencies, roles, and plan approval
 - **Agent Reuse**: Reference your existing agent definitions
 - **Smart Context**: Auto-includes git branch/status; optionally add files or full diffs
 - **Live Progress**: See what each agent is doing in real-time
@@ -59,6 +60,42 @@ Use the scout agent to analyze the codebase
 ```
 Run a chain: scout analyzes, then planner creates a plan
 ```
+
+### Team Coordination
+
+Coordinate a team of agents with task dependencies — like Claude Code agent teams but with multi-model support:
+
+```
+Create a team to refactor the auth module:
+- An architect to analyze and plan (require approval before implementation)
+- An implementer to do the refactoring after the plan is approved
+- A tester to write tests after implementation
+- A reviewer to check everything at the end
+```
+
+Or in JSON:
+```json
+{
+  "team": {
+    "objective": "Refactor the authentication module",
+    "members": [
+      { "role": "architect", "model": "claude-sonnet-4-5", "tools": ["read", "bash", "grep", "find"] },
+      { "role": "implementer", "model": "claude-sonnet-4-5" },
+      { "role": "tester", "model": "claude-sonnet-4-5" },
+      { "role": "reviewer", "model": "claude-haiku-4-5", "tools": ["read", "grep", "find"] }
+    ],
+    "tasks": [
+      { "id": "analyze", "assignee": "architect", "task": "Map all auth endpoints, data flows, and dependencies" },
+      { "id": "plan", "assignee": "architect", "task": "Create a refactoring plan based on the analysis", "depends": ["analyze"], "requiresApproval": true },
+      { "id": "implement", "assignee": "implementer", "task": "Implement the refactoring per the approved plan", "depends": ["plan"] },
+      { "id": "test", "assignee": "tester", "task": "Write comprehensive tests for the refactored module", "depends": ["implement"] },
+      { "id": "review", "assignee": "reviewer", "task": "Review all changes for quality and security", "depends": ["test"] }
+    ]
+  }
+}
+```
+
+Independent tasks (no shared dependencies) run in parallel automatically. Use `{task:id}` to reference output from a completed dependency.
 
 ## Automatic Context
 
@@ -143,6 +180,35 @@ First model to complete wins:
   }
 }
 ```
+
+### Team
+Coordinate agents with task dependencies (DAG-based execution):
+```json
+{
+  "team": {
+    "objective": "Review PR #42 from multiple angles",
+    "members": [
+      { "role": "security", "model": "sonnet", "tools": ["read", "grep", "find"] },
+      { "role": "perf", "model": "sonnet", "tools": ["read", "grep", "find"] },
+      { "role": "tests", "model": "haiku", "tools": ["read", "grep", "find"] },
+      { "role": "synthesizer", "model": "sonnet" }
+    ],
+    "tasks": [
+      { "id": "sec-review", "assignee": "security", "task": "Review for security vulnerabilities" },
+      { "id": "perf-review", "assignee": "perf", "task": "Review for performance issues" },
+      { "id": "test-review", "assignee": "tests", "task": "Check test coverage" },
+      { "id": "synthesis", "assignee": "synthesizer", "task": "Synthesize all findings into a summary", "depends": ["sec-review", "perf-review", "test-review"] }
+    ]
+  }
+}
+```
+
+**Key features:**
+- **Task dependencies**: `depends` array specifies prerequisites; independent tasks run in parallel
+- **Named references**: Use `{task:id}` in task text to include a dependency's output
+- **Plan approval**: Set `requiresApproval: true` to pause for review before dependents proceed
+- **Roles**: Members have roles; multiple tasks can be assigned to the same role
+- **Simple mode**: Omit `tasks` and give each member a `task` field — they all run in parallel
 
 ## Cross-Task References
 

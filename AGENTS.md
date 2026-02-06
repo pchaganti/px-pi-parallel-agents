@@ -16,6 +16,8 @@ src/
 ├── index.ts      # Main extension entry point, tool registration, mode dispatch
 ├── executor.ts   # Subprocess execution, spawns `pi --mode json` processes
 ├── parallel.ts   # Concurrency utilities (worker pool, race with abort)
+├── dag.ts        # DAG engine for team mode (build, validate, execute task graphs)
+├── workspace.ts  # Shared workspace for team artifact exchange
 ├── render.ts     # TUI rendering for progress and results
 ├── types.ts      # TypeScript types and Typebox schemas
 ├── agents.ts     # Agent discovery and configuration resolution
@@ -46,6 +48,7 @@ src/
 | Parallel | `params.tasks[]` | Concurrent execution with worker pool |
 | Chain | `params.chain[]` | Sequential, `{previous}` passes output between steps |
 | Race | `params.race` | Multiple models compete, first success wins |
+| Team | `params.team` | DAG-based team coordination with roles and dependencies |
 
 ## Agent Integration
 

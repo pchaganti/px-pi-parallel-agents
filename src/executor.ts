@@ -25,6 +25,8 @@ export interface ExecutorOptions {
   task: string;
   /** Working directory */
   cwd: string;
+  /** Provider name (e.g., "moonshot", "openai") */
+  provider?: string;
   /** Model to use (e.g., "claude-haiku-4-5") */
   model?: string;
   /** Tools to enable (if not specified, uses defaults) */
@@ -235,6 +237,7 @@ export async function runAgent(options: ExecutorOptions): Promise<TaskResult> {
   const {
     task,
     cwd,
+    provider,
     model,
     tools,
     systemPrompt,
@@ -250,6 +253,7 @@ export async function runAgent(options: ExecutorOptions): Promise<TaskResult> {
   const startTime = Date.now();
   const messages: Message[] = [];
   let stderr = "";
+  let apiError = "";
 
   // Build progress state
   const progress: TaskProgress = {
@@ -274,6 +278,10 @@ export async function runAgent(options: ExecutorOptions): Promise<TaskResult> {
 
   // Build command args
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
+
+  if (provider) {
+    args.push("--provider", provider);
+  }
 
   if (model) {
     args.push("--model", model);
@@ -332,6 +340,13 @@ export async function runAgent(options: ExecutorOptions): Promise<TaskResult> {
 
           if (msg.role === "assistant") {
             usage.turns++;
+
+            // Detect API/auth errors
+            const rawMsg = event.message as Record<string, unknown>;
+            if (rawMsg.stopReason === "error" && rawMsg.errorMessage) {
+              apiError = String(rawMsg.errorMessage);
+            }
+
             const msgUsage = msg.usage;
             if (msgUsage) {
               addUsage(usage, {
@@ -463,10 +478,16 @@ export async function runAgent(options: ExecutorOptions): Promise<TaskResult> {
       result.error = stderr || `Exit code: ${exitCode}`;
     }
 
+    // Detect API errors even with exit code 0 (pi exits 0 on auth failures)
+    if (apiError && !result.error) {
+      result.error = apiError;
+      result.exitCode = 1;
+    }
+
     // Update final progress
     progress.status = result.aborted
       ? "aborted"
-      : exitCode === 0
+      : result.exitCode === 0
         ? "completed"
         : "failed";
     progress.durationMs = result.durationMs;

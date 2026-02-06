@@ -83,12 +83,27 @@ export interface TaskResult {
 
 /** Tool details stored in session for persistence */
 export interface ParallelToolDetails {
-  mode: "single" | "parallel" | "chain" | "race";
+  mode: "single" | "parallel" | "chain" | "race" | "team";
   results: TaskResult[];
   totalDurationMs: number;
   usage: UsageStats;
   progress?: TaskProgress[];
   winner?: string; // For race mode - the winning task id
+  /** For team mode - DAG structure info */
+  dagInfo?: {
+    objective: string;
+    members: Array<{ role: string; model?: string }>;
+    tasks: Array<{
+      id: string;
+      assignee?: string;
+      depends: string[];
+      status: string;
+    }>;
+    pendingApproval?: {
+      taskId: string;
+      plan: string;
+    };
+  };
 }
 
 // ============================================================================
@@ -110,6 +125,11 @@ export const TaskItemSchema = Type.Object({
   agent: Type.Optional(
     Type.String({
       description: 'Name of an existing agent to use (from ~/.pi/agent/agents or .pi/agents). Agent settings (model, tools, systemPrompt) are used as defaults.',
+    })
+  ),
+  provider: Type.Optional(
+    Type.String({
+      description: 'Provider name (e.g., "moonshot", "openai", "google"). Required when model name alone is ambiguous.',
     })
   ),
   model: Type.Optional(
@@ -145,6 +165,9 @@ export const ChainStepSchema = Type.Object({
       description: 'Name of an existing agent to use. Agent settings are used as defaults.',
     })
   ),
+  provider: Type.Optional(
+    Type.String({ description: 'Provider name (e.g., "moonshot", "openai").' })
+  ),
   model: Type.Optional(Type.String({ description: "Model to use for this step. Overrides agent default." })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Restrict tools. Overrides agent default." })),
   systemPrompt: Type.Optional(Type.String({ description: "Override system prompt. Overrides agent default." })),
@@ -163,6 +186,9 @@ export const RaceConfigSchema = Type.Object({
   models: Type.Array(Type.String(), {
     description: 'Models to compete (e.g., ["claude-haiku-4-5", "gpt-4o-mini"])',
   }),
+  provider: Type.Optional(
+    Type.String({ description: 'Provider name for all race models (e.g., "moonshot").' })
+  ),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Restrict tools" })),
   systemPrompt: Type.Optional(Type.String({ description: "Override system prompt" })),
   thinking: Type.Optional(
@@ -173,6 +199,85 @@ export const RaceConfigSchema = Type.Object({
 });
 
 export type RaceConfig = Static<typeof RaceConfigSchema>;
+
+// ============================================================================
+// Team Mode Schemas
+// ============================================================================
+
+/** Schema for a team member */
+export const TeamMemberSchema = Type.Object({
+  role: Type.String({ description: "Role name for this member (used as assignee in tasks)" }),
+  agent: Type.Optional(
+    Type.String({
+      description: 'Name of an existing agent to use. Agent settings are used as defaults.',
+    })
+  ),
+  provider: Type.Optional(
+    Type.String({
+      description: 'Provider name (e.g., "moonshot", "openai").',
+    })
+  ),
+  model: Type.Optional(
+    Type.String({
+      description: 'Model to use (e.g., "claude-sonnet-4-5"). Overrides agent default.',
+    })
+  ),
+  tools: Type.Optional(
+    Type.Array(Type.String(), {
+      description: 'Restrict to specific tools. Overrides agent default.',
+    })
+  ),
+  systemPrompt: Type.Optional(
+    Type.String({ description: "Override system prompt. Overrides agent default." })
+  ),
+  task: Type.Optional(
+    Type.String({ description: "Default task description for this member (used if no tasks array is provided)" })
+  ),
+  thinking: Type.Optional(
+    Type.Union([Type.Number(), Type.String()], {
+      description: 'Thinking budget. Overrides agent default.',
+    })
+  ),
+});
+
+export type TeamMemberDef = Static<typeof TeamMemberSchema>;
+
+/** Schema for a team task with dependencies */
+export const TeamTaskSchema = Type.Object({
+  id: Type.String({ description: "Unique task identifier (used in depends and {task:id} references)" }),
+  task: Type.String({ description: "Task description. Use {task:id} to reference output from a dependency." }),
+  assignee: Type.Optional(Type.String({ description: "Role name of the member to run this task" })),
+  depends: Type.Optional(
+    Type.Array(Type.String(), {
+      description: 'IDs of tasks that must complete before this one starts',
+    })
+  ),
+  requiresApproval: Type.Optional(
+    Type.Boolean({
+      description: "If true, task runs in read-only mode and its output is returned for review before dependents proceed",
+    })
+  ),
+});
+
+export type TeamTask = Static<typeof TeamTaskSchema>;
+
+/** Schema for team configuration */
+export const TeamConfigSchema = Type.Object({
+  objective: Type.String({ description: "Overall team objective / goal" }),
+  members: Type.Array(TeamMemberSchema, {
+    description: "Team members with roles and capabilities",
+  }),
+  tasks: Type.Optional(
+    Type.Array(TeamTaskSchema, {
+      description: "Tasks with dependencies forming a DAG. If omitted, each member runs their default task in parallel.",
+    })
+  ),
+  maxConcurrency: Type.Optional(
+    Type.Number({ description: "Max concurrent tasks (default: 4)", default: 4 })
+  ),
+});
+
+export type TeamConfig = Static<typeof TeamConfigSchema>;
 
 /** Main tool parameters schema */
 export const ParallelParamsSchema = Type.Object({
@@ -186,6 +291,7 @@ export const ParallelParamsSchema = Type.Object({
       description: 'Name of an existing agent to use (for single mode). Agent settings are used as defaults.',
     })
   ),
+  provider: Type.Optional(Type.String({ description: 'Provider name (e.g., "moonshot", "openai", "google").' })),
   model: Type.Optional(Type.String({ description: "Model for single task. Overrides agent default." })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Tools for single task. Overrides agent default." })),
   systemPrompt: Type.Optional(Type.String({ description: "System prompt for single task. Overrides agent default." })),
@@ -241,6 +347,9 @@ export const ParallelParamsSchema = Type.Object({
 
   // Race mode
   race: Type.Optional(RaceConfigSchema),
+
+  // Team mode
+  team: Type.Optional(TeamConfigSchema),
 
   // Common options
   cwd: Type.Optional(Type.String({ description: "Working directory" })),

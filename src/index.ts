@@ -24,17 +24,20 @@ import {
   type TaskProgress,
   type TaskResult,
   type AgentScope,
+  type TeamTask,
   ParallelParamsSchema,
   createEmptyUsage,
   addUsage,
   DEFAULT_CONCURRENCY,
   MAX_CONCURRENCY,
 } from "./types.js";
-import { runAgent, type ExecutorOptions } from "./executor.js";
+import { runAgent } from "./executor.js";
 import { mapWithConcurrencyLimit, raceWithAbort } from "./parallel.js";
 import { renderCall, renderResult } from "./render.js";
 import { discoverAgents, findAgent, formatAgentList, type AgentConfig } from "./agents.js";
 import { buildContext } from "./context.js";
+import { buildDag, executeDag, type TeamMember, type DagNode } from "./dag.js";
+import { createWorkspace, writeTaskResult, cleanupWorkspace } from "./workspace.js";
 
 /**
  * Generate a unique task ID.
@@ -63,12 +66,14 @@ function resolveAgentSettings(
   agentName: string | undefined,
   agents: AgentConfig[],
   overrides: {
+    provider?: string;
     model?: string;
     tools?: string[];
     systemPrompt?: string;
     thinking?: number | string;
   }
 ): {
+  provider?: string;
   model?: string;
   tools?: string[];
   systemPrompt?: string;
@@ -87,6 +92,7 @@ function resolveAgentSettings(
 
   // Merge: inline overrides take precedence
   return {
+    provider: overrides.provider,
     model: overrides.model ?? agentConfig.model,
     tools: overrides.tools ?? agentConfig.tools,
     systemPrompt: overrides.systemPrompt ?? agentConfig.systemPrompt,
@@ -106,7 +112,9 @@ export default function (pi: ExtensionAPI) {
       "- Parallel: { tasks: [{task, model?, name?}, ...], maxConcurrency? }",
       "- Chain: { chain: [{task, model?}, ...] } - sequential with {previous} placeholder",
       "- Race: { race: {task, models: [...]} } - first to complete wins",
+      "- Team: { team: {objective, members: [{role, model?}], tasks: [{id, task, assignee?, depends?}]} } - DAG-based team coordination",
       "Model examples: claude-haiku-4-5, gpt-4o-mini, claude-sonnet-4-5",
+      "Use `provider` to specify the provider (e.g., moonshot, openai, google) when the model name alone is ambiguous.",
       "",
       "Agents: Reference existing agents by name (from ~/.pi/agent/agents or .pi/agents).",
       "Set agentScope to 'both' to include project-local agents.",
@@ -116,6 +124,13 @@ export default function (pi: ExtensionAPI) {
       "- gitContext: true (or {branch, diff, status, log}) - auto-include git info",
       "- contextFiles: ['path/to/file.rs'] - auto-read and include file contents",
       "- context: 'string' - manual context string",
+      "",
+      "Team mode: Coordinate a team of agents with task dependencies.",
+      "- members define roles with model/tools/systemPrompt",
+      "- tasks form a DAG with `depends` arrays and `{task:id}` references",
+      "- Independent tasks run in parallel; dependent tasks wait",
+      "- `requiresApproval: true` pauses for plan review before dependents proceed",
+      "- If no tasks array, each member runs their default task in parallel",
       "",
       "IMPORTANT: Each agent runs in the same working directory with full tool access (read, bash, etc).",
       "Do NOT pre-fetch data or write temp files for agents - they can use git, grep, find, etc. directly.",
@@ -137,9 +152,10 @@ export default function (pi: ExtensionAPI) {
       const hasRace = params.race !== undefined && params.race !== null;
       const hasTasks = Array.isArray(params.tasks) && params.tasks.length > 0;
       const hasSingle = typeof params.task === "string" && params.task.trim().length > 0;
+      const hasTeam = params.team !== undefined && params.team !== null;
 
       const modeCount =
-        Number(hasChain) + Number(hasRace) + Number(hasTasks) + Number(hasSingle);
+        Number(hasChain) + Number(hasRace) + Number(hasTasks) + Number(hasSingle) + Number(hasTeam);
 
       if (modeCount !== 1) {
         const { text: agentList } = formatAgentList(agents, 5);
@@ -147,7 +163,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `Invalid parameters. Provide exactly one mode: task (single), tasks (parallel), chain, or race.\n\nAvailable agents [${agentScope}]: ${agentList}`,
+              text: `Invalid parameters. Provide exactly one mode: task (single), tasks (parallel), chain, race, or team.\n\nAvailable agents [${agentScope}]: ${agentList}`,
             },
           ],
           details: {
@@ -211,6 +227,7 @@ export default function (pi: ExtensionAPI) {
         
         // Resolve agent settings
         const resolved = resolveAgentSettings(params.agent, agents, {
+          provider: params.provider,
           model: params.model,
           tools: params.tools,
           systemPrompt: params.systemPrompt,
@@ -234,6 +251,7 @@ export default function (pi: ExtensionAPI) {
         const result = await runAgent({
           task: params.task,
           cwd,
+          provider: resolved.provider,
           model: resolved.model,
           tools: resolved.tools,
           systemPrompt: resolved.systemPrompt,
@@ -288,6 +306,7 @@ export default function (pi: ExtensionAPI) {
           
           // Resolve agent settings for this step
           const resolved = resolveAgentSettings(step.agent, agents, {
+            provider: step.provider,
             model: step.model,
             tools: step.tools,
             systemPrompt: step.systemPrompt,
@@ -312,6 +331,7 @@ export default function (pi: ExtensionAPI) {
           const result = await runAgent({
             task: taskWithContext,
             cwd,
+            provider: resolved.provider,
             model: resolved.model,
             tools: resolved.tools,
             systemPrompt: resolved.systemPrompt,
@@ -359,7 +379,7 @@ export default function (pi: ExtensionAPI) {
       // Race Mode
       // ========================================================================
       if (hasRace && params.race) {
-        const { task, models, tools, systemPrompt, thinking } = params.race;
+        const { task, models, provider: raceProvider, tools, systemPrompt, thinking } = params.race;
         const results: TaskResult[] = [];
         const progress: TaskProgress[] = [];
 
@@ -389,6 +409,7 @@ export default function (pi: ExtensionAPI) {
             const result = await runAgent({
               task,
               cwd,
+              provider: raceProvider,
               model,
               tools,
               systemPrompt,
@@ -472,7 +493,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         const progress: TaskProgress[] = tasks.map((t, i) => {
-          const resolved = resolveAgentSettings(t.agent, agents, { model: t.model });
+          const resolved = resolveAgentSettings(t.agent, agents, { provider: t.provider, model: t.model });
           return {
             id: generateTaskId(i, t.name || resolved.agentConfig?.name),
             name: t.name || resolved.agentConfig?.name,
@@ -500,6 +521,7 @@ export default function (pi: ExtensionAPI) {
           async (t, index) => {
             // Resolve agent settings for this task
             const resolved = resolveAgentSettings(t.agent, agents, {
+              provider: t.provider,
               model: t.model,
               tools: t.tools,
               systemPrompt: t.systemPrompt,
@@ -527,6 +549,7 @@ export default function (pi: ExtensionAPI) {
             const result = await runAgent({
               task: taskText,
               cwd: t.cwd || cwd,
+              provider: resolved.provider,
               model: resolved.model,
               tools: resolved.tools,
               systemPrompt: resolved.systemPrompt,
@@ -621,6 +644,224 @@ export default function (pi: ExtensionAPI) {
           ],
           details: makeDetails("parallel", results, progress),
         };
+      }
+
+      // ========================================================================
+      // Team Mode
+      // ========================================================================
+      if (hasTeam && params.team) {
+        const { objective, members: memberDefs, tasks: taskDefs, maxConcurrency: teamMaxConcurrency } = params.team;
+        const maxConc = Math.min(
+          teamMaxConcurrency || DEFAULT_CONCURRENCY,
+          MAX_CONCURRENCY
+        );
+
+        // Build shared context
+        const sharedContext = buildContext(cwd, {
+          context: params.context,
+          contextFiles: params.contextFiles,
+          gitContext: params.gitContext ?? { branch: true, status: true },
+        });
+
+        // Create workspace
+        const workspace = createWorkspace();
+
+        try {
+          // Build members map, resolving agent settings
+          const membersMap = new Map<string, TeamMember>();
+          const missingAgents: string[] = [];
+
+          for (const memberDef of memberDefs) {
+            const resolved = resolveAgentSettings(memberDef.agent, agents, {
+              provider: memberDef.provider,
+              model: memberDef.model,
+              tools: memberDef.tools,
+              systemPrompt: memberDef.systemPrompt,
+              thinking: memberDef.thinking,
+            });
+
+            if (memberDef.agent && !resolved.agentConfig) {
+              missingAgents.push(memberDef.agent);
+            }
+
+            membersMap.set(memberDef.role, {
+              role: memberDef.role,
+              agent: memberDef.agent,
+              agentConfig: resolved.agentConfig,
+              provider: resolved.provider,
+              model: resolved.model,
+              tools: resolved.tools,
+              systemPrompt: resolved.systemPrompt,
+              thinking: resolved.thinking,
+            });
+          }
+
+          if (missingAgents.length > 0) {
+            const { text: agentList } = formatAgentList(agents, 5);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Unknown agent(s) in team: ${[...new Set(missingAgents)].join(", ")}\n\nAvailable agents [${agentScope}]: ${agentList}`,
+                },
+              ],
+              details: makeDetails("team", []),
+            };
+          }
+
+          // Build tasks
+          let teamTasks: TeamTask[];
+
+          if (taskDefs && taskDefs.length > 0) {
+            // Explicit task DAG
+            teamTasks = taskDefs;
+          } else {
+            // Auto-generate: each member runs their default task in parallel
+            teamTasks = memberDefs
+              .filter((m) => m.task)
+              .map((m) => ({
+                id: m.role,
+                task: m.task!,
+                assignee: m.role,
+              }));
+
+            if (teamTasks.length === 0) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: "Team mode requires either a `tasks` array or each member must have a `task` field.",
+                  },
+                ],
+                details: makeDetails("team", []),
+              };
+            }
+          }
+
+          // Build and validate DAG
+          let dagNodes: Map<string, DagNode>;
+          try {
+            dagNodes = buildDag(teamTasks, membersMap);
+          } catch (err) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Team DAG error: ${err instanceof Error ? err.message : String(err)}`,
+                },
+              ],
+              details: makeDetails("team", []),
+              isError: true,
+            };
+          }
+
+          // Execute the DAG
+          const dagResult = await executeDag({
+            nodes: dagNodes,
+            members: membersMap,
+            objective,
+            cwd,
+            maxConcurrency: maxConc,
+            sharedContext: sharedContext || undefined,
+            workspacePath: workspace.root,
+            signal,
+            onProgress: (nodes, progress) => {
+              emitUpdate("team", [], progress);
+            },
+          });
+
+          // Write results to workspace for persistence
+          for (const result of dagResult.results) {
+            writeTaskResult(
+              workspace,
+              result.id,
+              result.output,
+              result.exitCode === 0 ? "completed" : "failed"
+            );
+          }
+
+          const results = dagResult.results;
+          const successCount = results.filter((r) => r.exitCode === 0).length;
+
+          // Build DAG info for details
+          const dagInfo: ParallelToolDetails["dagInfo"] = {
+            objective,
+            members: memberDefs.map((m) => ({
+              role: m.role,
+              model: membersMap.get(m.role)?.model,
+            })),
+            tasks: teamTasks.map((t) => {
+              const node = dagNodes.get(t.id);
+              return {
+                id: t.id,
+                assignee: t.assignee,
+                depends: t.depends ?? [],
+                status: node?.status ?? "pending",
+              };
+            }),
+          };
+
+          // Build summaries
+          const summaries = results.map((r, idx) => {
+            const output = r.output.trim();
+            const stats: string[] = [];
+            if (r.usage.turns > 0) stats.push(`${r.usage.turns} turns`);
+            if (r.model) stats.push(r.model);
+            if (r.usage.cost > 0) stats.push(`$${r.usage.cost.toFixed(4)}`);
+            const statsStr = stats.length > 0 ? ` (${stats.join(", ")})` : "";
+            const status = r.exitCode === 0 ? "✓" : "✗";
+
+            // Find assignee info
+            const taskDef = teamTasks.find((t) => t.id === r.id);
+            const assigneeInfo = taskDef?.assignee ? `[${taskDef.assignee}] ` : "";
+
+            // Include output - up to 2000 chars per task
+            const maxLen = 2000;
+            let outputSection: string;
+
+            if (output.length > maxLen) {
+              const safeName = (r.name || r.id || `task_${idx}`).replace(/[^\w.-]/g, "_");
+              const outputPath = path.join(os.tmpdir(), `team-${safeName}-${Date.now()}.md`);
+              try {
+                fs.writeFileSync(outputPath, output, "utf-8");
+                r.fullOutputPath = outputPath;
+                outputSection = output.slice(0, maxLen) + `\n\n... [truncated, full output: ${outputPath}]`;
+              } catch {
+                outputSection = output.slice(0, maxLen) + `\n... [${output.length - maxLen} more chars]`;
+              }
+            } else {
+              outputSection = output || "(no output)";
+            }
+
+            return `### ${status} ${assigneeInfo}${r.name || r.id}${statsStr}\n\n${outputSection}`;
+          });
+
+          // Calculate total cost
+          const totalCost = results.reduce((sum, r) => sum + (r.usage.cost || 0), 0);
+          const costInfo = totalCost > 0 ? ` | Total cost: $${totalCost.toFixed(4)}` : "";
+
+          // Report blocked tasks
+          const blockedTasks = [...dagNodes.values()].filter((n) => n.status === "blocked");
+          const blockedInfo = blockedTasks.length > 0
+            ? `\n\n**Blocked tasks:** ${blockedTasks.map((n) => n.task.id).join(", ")} (dependencies failed)`
+            : "";
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `## Team: ${successCount}/${teamTasks.length} tasks succeeded${dagResult.aborted ? " (aborted)" : ""}${costInfo}\n\n**Objective:** ${objective}${blockedInfo}\n\n${summaries.join("\n\n---\n\n")}`,
+              },
+            ],
+            details: {
+              ...makeDetails("team", results),
+              dagInfo,
+            },
+          };
+        } finally {
+          // Cleanup workspace
+          cleanupWorkspace(workspace);
+        }
       }
 
       // Should not reach here
